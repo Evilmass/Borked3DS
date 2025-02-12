@@ -82,6 +82,18 @@ template <typename T>
 struct is_vectorizable : std::bool_constant<std::is_same_v<T, float> && has_simd_support> {};
 } // namespace detail
 
+// Set up ARM NEON FP control if available
+#if defined(HAVE_NEON) && defined(__aarch64__)
+namespace {
+inline void ConfigureNEONFP() {
+    uint64_t fpcr;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= (1 << 24); // Set flush-to-zero
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(fpcr));
+}
+} // namespace
+#endif
+
 template <typename T>
 class Vec2 {
     friend class boost::serialization::access;
@@ -96,7 +108,17 @@ public:
     T y;
 
     constexpr Vec2() = default;
-    constexpr Vec2(const T& x_, const T& y_) : x(x_), y(y_) {}
+
+    constexpr Vec2(const T& x_, const T& y_) : x(x_), y(y_) {
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_NEON)
+            float values[2] = {x_, y_};
+            float32x2_t temp = vld1_f32(values);
+            x = vget_lane_f32(temp, 0);
+            y = vget_lane_f32(temp, 1);
+#endif
+        }
+    }
 
     [[nodiscard]] T* AsArray() {
         return &x;
@@ -119,18 +141,16 @@ public:
         if constexpr (detail::is_vectorizable<T>::value) {
             Vec2<T> result;
 #if defined(HAVE_SSE2)
-            // Load xy components into lower half of XMM register
             __m128 a = _mm_setr_ps(x, y, 0.0f, 0.0f);
             __m128 b = _mm_setr_ps(other.x, other.y, 0.0f, 0.0f);
             __m128 sum = _mm_add_ps(a, b);
             result.x = _mm_cvtss_f32(sum);
             result.y = _mm_cvtss_f32(_mm_shuffle_ps(sum, sum, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             float32x2_t sum = vadd_f32(a, b);
-            result.x = vget_lane_f32(sum, 0);
-            result.y = vget_lane_f32(sum, 1);
+            vst1_f32(&result.x, sum);
 #endif
             return result;
         } else {
@@ -138,7 +158,7 @@ public:
         }
     }
 
-    [[nodiscard]] constexpr Vec2& operator+=(const Vec2& other) {
+    constexpr Vec2& operator+=(const Vec2& other) {
         if constexpr (detail::is_vectorizable<T>::value) {
 #if defined(HAVE_SSE2)
             __m128 a = _mm_setr_ps(x, y, 0.0f, 0.0f);
@@ -147,11 +167,10 @@ public:
             x = _mm_cvtss_f32(sum);
             y = _mm_cvtss_f32(_mm_shuffle_ps(sum, sum, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             float32x2_t sum = vadd_f32(a, b);
-            x = vget_lane_f32(sum, 0);
-            y = vget_lane_f32(sum, 1);
+            vst1_f32(&x, sum);
 #endif
         } else {
             x += other.x;
@@ -170,17 +189,17 @@ public:
             result.x = _mm_cvtss_f32(diff);
             result.y = _mm_cvtss_f32(_mm_shuffle_ps(diff, diff, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             float32x2_t diff = vsub_f32(a, b);
-            result.x = vget_lane_f32(diff, 0);
-            result.y = vget_lane_f32(diff, 1);
+            vst1_f32(&result.x, diff);
 #endif
             return result;
         } else {
             return {x - other.x, y - other.y};
         }
     }
+
     constexpr Vec2& operator-=(const Vec2& other) {
         if constexpr (detail::is_vectorizable<T>::value) {
 #if defined(HAVE_SSE2)
@@ -190,11 +209,10 @@ public:
             x = _mm_cvtss_f32(diff);
             y = _mm_cvtss_f32(_mm_shuffle_ps(diff, diff, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             float32x2_t diff = vsub_f32(a, b);
-            x = vget_lane_f32(diff, 0);
-            y = vget_lane_f32(diff, 1);
+            vst1_f32(&x, diff);
 #endif
         } else {
             x -= other.x;
@@ -213,16 +231,16 @@ public:
             result.x = _mm_cvtss_f32(neg);
             result.y = _mm_cvtss_f32(_mm_shuffle_ps(neg, neg, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
+            float32x2_t a = vld1_f32(&x);
             float32x2_t neg = vneg_f32(a);
-            result.x = vget_lane_f32(neg, 0);
-            result.y = vget_lane_f32(neg, 1);
+            vst1_f32(&result.x, neg);
 #endif
             return result;
         } else {
             return {-x, -y};
         }
     }
+
     [[nodiscard]] constexpr Vec2<decltype(T{} * T{})> operator*(const Vec2& other) const {
         if constexpr (detail::is_vectorizable<T>::value) {
             Vec2<T> result;
@@ -233,11 +251,10 @@ public:
             result.x = _mm_cvtss_f32(prod);
             result.y = _mm_cvtss_f32(_mm_shuffle_ps(prod, prod, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             float32x2_t prod = vmul_f32(a, b);
-            result.x = vget_lane_f32(prod, 0);
-            result.y = vget_lane_f32(prod, 1);
+            vst1_f32(&result.x, prod);
 #endif
             return result;
         } else {
@@ -256,11 +273,10 @@ public:
             result.x = _mm_cvtss_f32(prod);
             result.y = _mm_cvtss_f32(_mm_shuffle_ps(prod, prod, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
+            float32x2_t a = vld1_f32(&x);
             float32x2_t b = vdup_n_f32(f);
             float32x2_t prod = vmul_f32(a, b);
-            result.x = vget_lane_f32(prod, 0);
-            result.y = vget_lane_f32(prod, 1);
+            vst1_f32(&result.x, prod);
 #endif
             return result;
         } else {
@@ -278,14 +294,14 @@ public:
             x = _mm_cvtss_f32(prod);
             y = _mm_cvtss_f32(_mm_shuffle_ps(prod, prod, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
+            float32x2_t a = vld1_f32(&x);
             float32x2_t b = vdup_n_f32(f);
             float32x2_t prod = vmul_f32(a, b);
-            x = vget_lane_f32(prod, 0);
-            y = vget_lane_f32(prod, 1);
+            vst1_f32(&x, prod);
 #endif
         } else {
-            *this = *this * f;
+            x *= f;
+            y *= f;
         }
         return *this;
     }
@@ -301,12 +317,13 @@ public:
             result.x = _mm_cvtss_f32(quot);
             result.y = _mm_cvtss_f32(_mm_shuffle_ps(quot, quot, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            // NEON doesn't have direct division, use reciprocal multiplication
+            float32x2_t a = vld1_f32(&x);
+            // Improved precision with two Newton-Raphson iterations
             float32x2_t recip = vdup_n_f32(1.0f / f);
+            recip = vmul_f32(recip, vrsqrts_f32(vdup_n_f32(f), vmul_f32(recip, recip)));
+            recip = vmul_f32(recip, vrsqrts_f32(vdup_n_f32(f), vmul_f32(recip, recip)));
             float32x2_t quot = vmul_f32(a, recip);
-            result.x = vget_lane_f32(quot, 0);
-            result.y = vget_lane_f32(quot, 1);
+            vst1_f32(&result.x, quot);
 #endif
             return result;
         } else {
@@ -324,15 +341,17 @@ public:
             x = _mm_cvtss_f32(quot);
             y = _mm_cvtss_f32(_mm_shuffle_ps(quot, quot, _MM_SHUFFLE(1, 1, 1, 1)));
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            // NEON doesn't have direct division, use reciprocal multiplication
+            float32x2_t a = vld1_f32(&x);
+            // Improved precision with two Newton-Raphson iterations
             float32x2_t recip = vdup_n_f32(1.0f / f);
+            recip = vmul_f32(recip, vrsqrts_f32(vdup_n_f32(f), vmul_f32(recip, recip)));
+            recip = vmul_f32(recip, vrsqrts_f32(vdup_n_f32(f), vmul_f32(recip, recip)));
             float32x2_t quot = vmul_f32(a, recip);
-            x = vget_lane_f32(quot, 0);
-            y = vget_lane_f32(quot, 1);
+            vst1_f32(&x, quot);
 #endif
         } else {
-            *this = *this / f;
+            x /= f;
+            y /= f;
         }
         return *this;
     }
@@ -342,10 +361,9 @@ public:
 #if defined(HAVE_SSE2)
             __m128 v = _mm_setr_ps(x, y, 0.0f, 0.0f);
             __m128 sq = _mm_mul_ps(v, v);
-            // Add x+y components
             return _mm_cvtss_f32(_mm_add_ss(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1))));
 #elif defined(HAVE_NEON)
-            float32x2_t v = {x, y};
+            float32x2_t v = vld1_f32(&x);
             float32x2_t sq = vmul_f32(v, v);
             return vget_lane_f32(vpadd_f32(sq, sq), 0);
 #endif
@@ -360,10 +378,10 @@ public:
             __m128 a = _mm_setr_ps(x, y, 0.0f, 0.0f);
             __m128 b = _mm_setr_ps(other.x, other.y, 0.0f, 0.0f);
             __m128 cmp = _mm_cmpeq_ps(a, b);
-            return (_mm_movemask_ps(cmp) & 0x3) != 0x3; // Check only x,y (mask 0x3)
+            return (_mm_movemask_ps(cmp) & 0x3) != 0x3;
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             uint32x2_t cmp = vceq_f32(a, b);
             return (vget_lane_u32(cmp, 0) & vget_lane_u32(cmp, 1)) != 0xFFFFFFFF;
 #endif
@@ -378,10 +396,10 @@ public:
             __m128 a = _mm_setr_ps(x, y, 0.0f, 0.0f);
             __m128 b = _mm_setr_ps(other.x, other.y, 0.0f, 0.0f);
             __m128 cmp = _mm_cmpeq_ps(a, b);
-            return (_mm_movemask_ps(cmp) & 0x3) == 0x3; // Check only x,y (mask 0x3)
+            return (_mm_movemask_ps(cmp) & 0x3) == 0x3;
 #elif defined(HAVE_NEON)
-            float32x2_t a = {x, y};
-            float32x2_t b = {other.x, other.y};
+            float32x2_t a = vld1_f32(&x);
+            float32x2_t b = vld1_f32(&other.x);
             uint32x2_t cmp = vceq_f32(a, b);
             return (vget_lane_u32(cmp, 0) & vget_lane_u32(cmp, 1)) == 0xFFFFFFFF;
 #endif
@@ -397,13 +415,22 @@ public:
     [[nodiscard]] constexpr T& operator[](std::size_t i) {
         return *((&x) + i);
     }
+
     [[nodiscard]] constexpr const T& operator[](std::size_t i) const {
         return *((&x) + i);
     }
 
     constexpr void SetZero() {
-        x = 0;
-        y = 0;
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_SSE2)
+            _mm_store_ps(&x, _mm_setzero_ps());
+#elif defined(HAVE_NEON)
+            vst1_f32(&x, vdup_n_f32(0.0f));
+#endif
+        } else {
+            x = 0;
+            y = 0;
+        }
     }
 
     // Common aliases: UV (texel coordinates), ST (texture coordinates)
@@ -447,7 +474,7 @@ public:
 
 template <typename T, typename V>
 [[nodiscard]] constexpr Vec2<T> operator*(const V& f, const Vec2<T>& vec) {
-    return Vec2<T>(f * vec.x, f * vec.y);
+    return vec * f;
 }
 
 using Vec2f = Vec2<float>;
@@ -457,20 +484,20 @@ using Vec2u = Vec2<unsigned int>;
 template <>
 inline float Vec2<float>::Length() const {
 #if defined(HAVE_SSE4_1)
-    // SSE4.1 has a dedicated dot product instruction
+    // Use SSE4.1's dedicated dot product instruction
     __m128 v = _mm_setr_ps(x, y, 0.0f, 0.0f);
     return _mm_cvtss_f32(_mm_sqrt_ss(
         _mm_dp_ps(v, v, 0x31))); // 0x31: only multiply xy (0x3) and store in lowest (0x1)
 #elif defined(HAVE_SSE2)
     __m128 v = _mm_setr_ps(x, y, 0.0f, 0.0f);
-    __m128 sq = _mm_mul_ps(v, v); // Square components
-    __m128 sum = _mm_add_ss(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1))); // Add x^2 + y^2
-    return _mm_cvtss_f32(_mm_sqrt_ss(sum));                                       // sqrt(x^2 + y^2)
+    __m128 sq = _mm_mul_ps(v, v);
+    __m128 sum = _mm_add_ss(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1)));
+    return _mm_cvtss_f32(_mm_sqrt_ss(sum));
 #elif defined(HAVE_NEON)
-    float32x2_t v = {x, y};
-    float32x2_t sq = vmul_f32(v, v);     // Square components
-    float32x2_t sum = vpadd_f32(sq, sq); // Horizontal add
-    return sqrt(vget_lane_f32(sum, 0));  // sqrt(x^2 + y^2)
+    float32x2_t v = vld1_f32(&x);
+    float32x2_t sq = vmul_f32(v, v);
+    float32x2_t sum = vpadd_f32(sq, sq);
+    return sqrtf(vget_lane_f32(sum, 0));
 #else
     return std::sqrt(x * x + y * y);
 #endif
@@ -479,7 +506,26 @@ inline float Vec2<float>::Length() const {
 template <>
 inline float Vec2<float>::Normalize() {
     float length = Length();
-    *this /= length;
+    if constexpr (detail::is_vectorizable<float>::value) {
+#if defined(HAVE_SSE2)
+        if (length != 0) {
+            __m128 vec = _mm_setr_ps(x, y, 0.0f, 0.0f);
+            __m128 len = _mm_set1_ps(length);
+            __m128 normalized = _mm_div_ps(vec, len);
+            x = _mm_cvtss_f32(normalized);
+            y = _mm_cvtss_f32(_mm_shuffle_ps(normalized, normalized, _MM_SHUFFLE(1, 1, 1, 1)));
+        }
+#elif defined(HAVE_NEON)
+        if (length != 0) {
+            float32x2_t vec = vld1_f32(&x);
+            float32x2_t recip = vdup_n_f32(1.0f / length);
+            float32x2_t normalized = vmul_f32(vec, recip);
+            vst1_f32(&x, normalized);
+        }
+#endif
+    } else {
+        *this /= length;
+    }
     return length;
 }
 
@@ -500,7 +546,22 @@ public:
     T pad; // For SIMD alignment
 
     constexpr Vec3() = default;
-    constexpr Vec3(const T& x_, const T& y_, const T& z_) : x(x_), y(y_), z(z_) {}
+
+    constexpr Vec3(const T& x_, const T& y_, const T& z_) {
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_SSE2)
+            __m128 vec = _mm_setr_ps(x_, y_, z_, 0.0f);
+            _mm_store_ps(&x, vec);
+#elif defined(HAVE_NEON)
+            float values[4] = {x_, y_, z_, 0.0f};
+            vst1q_f32(&x, vld1q_f32(values));
+#endif
+        } else {
+            x = x_;
+            y = y_;
+            z = z_;
+        }
+    }
 
     [[nodiscard]] T* AsArray() {
         return &x;
@@ -518,7 +579,6 @@ public:
             if constexpr (std::is_same_v<T, float> && std::is_same_v<T2, float>) {
                 _mm_store_ps(&result.x, _mm_load_ps(&x));
             } else {
-                // Fallback to scalar for other type conversions
                 result.x = static_cast<T2>(x);
                 result.y = static_cast<T2>(y);
                 result.z = static_cast<T2>(z);
@@ -527,7 +587,6 @@ public:
             if constexpr (std::is_same_v<T, float> && std::is_same_v<T2, float>) {
                 vst1q_f32(&result.x, vld1q_f32(&x));
             } else {
-                // Fallback to scalar for other type conversions
                 result.x = static_cast<T2>(x);
                 result.y = static_cast<T2>(y);
                 result.z = static_cast<T2>(z);
@@ -543,7 +602,7 @@ public:
         if constexpr (detail::is_vectorizable<T>::value) {
             Vec3<T> result;
 #if defined(HAVE_SSE2)
-            _mm_store_ps(&result.x, _mm_set_ps1(f));
+            _mm_store_ps(&result.x, _mm_set1_ps(f));
 #elif defined(HAVE_NEON)
             vst1q_f32(&result.x, vdupq_n_f32(f));
 #endif
@@ -613,7 +672,17 @@ public:
 
     template <typename U = T>
     [[nodiscard]] constexpr Vec3<std::enable_if_t<std::is_signed_v<U>, U>> operator-() const {
-        return {-x, -y, -z};
+        if constexpr (detail::is_vectorizable<T>::value) {
+            Vec3<T> result;
+#if defined(HAVE_SSE2)
+            _mm_store_ps(&result.x, _mm_sub_ps(_mm_setzero_ps(), _mm_load_ps(&x)));
+#elif defined(HAVE_NEON)
+            vst1q_f32(&result.x, vnegq_f32(vld1q_f32(&x)));
+#endif
+            return result;
+        } else {
+            return {-x, -y, -z};
+        }
     }
 
     [[nodiscard]] constexpr Vec3<decltype(T{} * T{})> operator*(const Vec3& other) const {
@@ -660,6 +729,7 @@ public:
         }
         return *this;
     }
+
     template <typename V>
     [[nodiscard]] constexpr Vec3<decltype(T{} / V{})> operator/(const V& f) const {
         if constexpr (detail::is_vectorizable<T>::value && std::is_same_v<V, float>) {
@@ -667,10 +737,10 @@ public:
 #if defined(HAVE_SSE2)
             _mm_store_ps(&result.x, _mm_div_ps(_mm_load_ps(&x), _mm_set1_ps(f)));
 #elif defined(HAVE_NEON)
-            // NEON doesn't have a direct divide instruction, so we multiply by reciprocal
+            // Improved precision with two Newton-Raphson iterations
             float32x4_t recip = vrecpeq_f32(vdupq_n_f32(f));
-            // One Newton-Raphson iteration for better precision
-            recip = vmulq_f32(vrecpsq_f32(vdupq_n_f32(f), recip), recip);
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
             vst1q_f32(&result.x, vmulq_f32(vld1q_f32(&x), recip));
 #endif
             return result;
@@ -685,10 +755,10 @@ public:
 #if defined(HAVE_SSE2)
             _mm_store_ps(&x, _mm_div_ps(_mm_load_ps(&x), _mm_set1_ps(f)));
 #elif defined(HAVE_NEON)
-            // NEON doesn't have a direct divide instruction, so we multiply by reciprocal
+            // Improved precision with two Newton-Raphson iterations
             float32x4_t recip = vrecpeq_f32(vdupq_n_f32(f));
-            // One Newton-Raphson iteration for better precision
-            recip = vmulq_f32(vrecpsq_f32(vdupq_n_f32(f), recip), recip);
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
             vst1q_f32(&x, vmulq_f32(vld1q_f32(&x), recip));
 #endif
         } else {
@@ -699,10 +769,6 @@ public:
         return *this;
     }
 
-    [[nodiscard]] constexpr bool operator!=(const Vec3& other) const {
-        return !(*this == other);
-    }
-
     [[nodiscard]] constexpr bool operator==(const Vec3& other) const {
         if constexpr (detail::is_vectorizable<T>::value) {
 #if defined(HAVE_SSE2)
@@ -710,12 +776,16 @@ public:
             return (_mm_movemask_ps(cmp) & 0x7) == 0x7; // Check only x,y,z (mask 0x7)
 #elif defined(HAVE_NEON)
             uint32x4_t cmp = vceqq_f32(vld1q_f32(&x), vld1q_f32(&other.x));
-            return (vgetq_lane_u32(cmp, 0) & vgetq_lane_u32(cmp, 1) & vgetq_lane_u32(cmp, 2)) ==
-                   0xFFFFFFFF;
+            uint32x2_t hi_lo = vand_u32(vget_high_u32(cmp), vget_low_u32(cmp));
+            return (vget_lane_u32(hi_lo, 0) & vget_lane_u32(hi_lo, 1)) == 0xFFFFFFFF;
 #endif
         } else {
             return x == other.x && y == other.y && z == other.z;
         }
+    }
+
+    [[nodiscard]] constexpr bool operator!=(const Vec3& other) const {
+        return !(*this == other);
     }
 
     [[nodiscard]] constexpr T Length2() const {
@@ -723,7 +793,6 @@ public:
 #if defined(HAVE_SSE2)
             __m128 v = _mm_load_ps(&x);
             __m128 sq = _mm_mul_ps(v, v);
-            // Add x+y+z components (we don't care about w)
             __m128 sum = _mm_add_ss(_mm_add_ss(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1))),
                                     _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 2, 2, 2)));
             return _mm_cvtss_f32(sum);
@@ -731,14 +800,13 @@ public:
             float32x4_t v = vld1q_f32(&x);
             float32x4_t sq = vmulq_f32(v, v);
             float32x2_t sum = vpadd_f32(vget_low_f32(sq), vget_high_f32(sq));
-            return vget_lane_f32(vpadd_f32(sum, sum), 0); // Only need x+y+z
+            return vget_lane_f32(vpadd_f32(sum, vdup_n_f32(0.0f)), 0);
 #endif
         } else {
             return x * x + y * y + z * z;
         }
     }
 
-    // Only implemented for T=float
     [[nodiscard]] float Length() const;
     [[nodiscard]] Vec3 Normalized() const;
     float Normalize(); // returns the previous length, which is often useful
@@ -752,9 +820,17 @@ public:
     }
 
     constexpr void SetZero() {
-        x = 0;
-        y = 0;
-        z = 0;
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_SSE2)
+            _mm_store_ps(&x, _mm_setzero_ps());
+#elif defined(HAVE_NEON)
+            vst1q_f32(&x, vdupq_n_f32(0.0f));
+#endif
+        } else {
+            x = 0;
+            y = 0;
+            z = 0;
+        }
     }
 
     // Common aliases: UVW (texel coordinates), RGB (colors), STQ (texture coordinates)
@@ -819,13 +895,11 @@ public:
     }
 
 // swizzlers - create a subvector of specific components
-// e.g. Vec2 uv() { return Vec2(x,y); }
-// _DEFINE_SWIZZLER2 defines a single such function, DEFINE_SWIZZLER2 defines all of them for all
-// component names (x<->r) and permutations (xy<->yx)
 #define _DEFINE_SWIZZLER2(a, b, name)                                                              \
     [[nodiscard]] constexpr Vec2<T> name() const {                                                 \
         return Vec2<T>(a, b);                                                                      \
     }
+
 #define DEFINE_SWIZZLER2(a, b, a2, b2, a3, b3, a4, b4)                                             \
     _DEFINE_SWIZZLER2(a, b, a##b);                                                                 \
     _DEFINE_SWIZZLER2(a, b, a2##b2);                                                               \
@@ -839,31 +913,29 @@ public:
     DEFINE_SWIZZLER2(x, y, r, g, u, v, s, t);
     DEFINE_SWIZZLER2(x, z, r, b, u, w, s, q);
     DEFINE_SWIZZLER2(y, z, g, b, v, w, t, q);
+
 #undef DEFINE_SWIZZLER2
 #undef _DEFINE_SWIZZLER2
 };
 
 template <typename T, typename V>
 [[nodiscard]] constexpr Vec3<T> operator*(const V& f, const Vec3<T>& vec) {
-    if constexpr (detail::is_vectorizable<T>::value && std::is_same_v<V, float>) {
-        Vec3<T> result;
-#if defined(HAVE_SSE2)
-        _mm_store_ps(&result.x, _mm_mul_ps(_mm_set1_ps(f), _mm_load_ps(&vec.x)));
-#elif defined(HAVE_NEON)
-        vst1q_f32(&result.x, vmulq_f32(vdupq_n_f32(f), vld1q_f32(&vec.x)));
-#endif
-        return result;
-    } else {
-        return Vec3<T>(f * vec.x, f * vec.y, f * vec.z);
-    }
+    return vec * f;
 }
+
+using Vec3f = Vec3<float>;
+using Vec3i = Vec3<int>;
+using Vec3u = Vec3<unsigned int>;
 
 template <>
 inline float Vec3<float>::Length() const {
-#if defined(HAVE_SSE2)
+#if defined(HAVE_SSE4_1)
+    // Use SSE4.1's dedicated dot product instruction
+    __m128 v = _mm_load_ps(&x);
+    return _mm_cvtss_f32(_mm_sqrt_ss(_mm_dp_ps(v, v, 0x71)));
+#elif defined(HAVE_SSE2)
     __m128 v = _mm_load_ps(&x);
     __m128 sq = _mm_mul_ps(v, v);
-    // Horizontal add x+y+z components
     __m128 sum = _mm_add_ss(_mm_add_ss(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1))),
                             _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 2, 2, 2)));
     return _mm_cvtss_f32(_mm_sqrt_ss(sum));
@@ -871,7 +943,8 @@ inline float Vec3<float>::Length() const {
     float32x4_t v = vld1q_f32(&x);
     float32x4_t sq = vmulq_f32(v, v);
     float32x2_t sum = vpadd_f32(vget_low_f32(sq), vget_high_f32(sq));
-    return sqrt(vget_lane_f32(vpadd_f32(sum, sum), 0)); // Only need x+y+z
+    float32x2_t total = vpadd_f32(sum, vdup_n_f32(0.0f));
+    return sqrtf(vget_lane_f32(total, 0));
 #else
     return std::sqrt(x * x + y * y + z * z);
 #endif
@@ -882,26 +955,22 @@ inline Vec3<float> Vec3<float>::Normalized() const {
 #if defined(HAVE_SSE2)
     __m128 v = _mm_load_ps(&x);
     __m128 sq = _mm_mul_ps(v, v);
-    // Compute sum of squares
     __m128 sum = _mm_add_ss(_mm_add_ss(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 1, 1, 1))),
                             _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 2, 2, 2)));
-    // Get reciprocal sqrt and broadcast to all elements
-    __m128 len = _mm_sqrt_ss(sum);
-    __m128 recip = _mm_div_ps(_mm_set1_ps(1.0f), _mm_shuffle_ps(len, len, _MM_SHUFFLE(0, 0, 0, 0)));
-
+    __m128 length = _mm_sqrt_ss(sum);
+    __m128 scale =
+        _mm_div_ps(_mm_set1_ps(1.0f), _mm_shuffle_ps(length, length, _MM_SHUFFLE(0, 0, 0, 0)));
     Vec3<float> result;
-    _mm_store_ps(&result.x, _mm_mul_ps(v, recip));
+    _mm_store_ps(&result.x, _mm_mul_ps(v, scale));
     return result;
 #elif defined(HAVE_NEON)
     float32x4_t v = vld1q_f32(&x);
     float32x4_t sq = vmulq_f32(v, v);
     float32x2_t sum = vpadd_f32(vget_low_f32(sq), vget_high_f32(sq));
-    float32x2_t len = vsqrt_f32(vpadd_f32(sum, sum));
-    // Compute reciprocal and broadcast
-    float32x4_t recip = vdupq_n_f32(1.0f / vget_lane_f32(len, 0));
-
+    float32x2_t len = vsqrt_f32(vpadd_f32(sum, vdup_n_f32(0.0f)));
+    float32x4_t scale = vdupq_n_f32(1.0f / vget_lane_f32(len, 0));
     Vec3<float> result;
-    vst1q_f32(&result.x, vmulq_f32(v, recip));
+    vst1q_f32(&result.x, vmulq_f32(v, scale));
     return result;
 #else
     return *this / Length();
@@ -911,13 +980,26 @@ inline Vec3<float> Vec3<float>::Normalized() const {
 template <>
 inline float Vec3<float>::Normalize() {
     float length = Length();
-    *this /= length;
+    if constexpr (detail::is_vectorizable<float>::value) {
+#if defined(HAVE_SSE2)
+        if (length != 0) {
+            __m128 vec = _mm_load_ps(&x);
+            __m128 len = _mm_set1_ps(length);
+            __m128 normalized = _mm_div_ps(vec, len);
+            _mm_store_ps(&x, normalized);
+        }
+#elif defined(HAVE_NEON)
+        if (length != 0) {
+            float32x4_t vec = vld1q_f32(&x);
+            float32x4_t scale = vdupq_n_f32(1.0f / length);
+            vst1q_f32(&x, vmulq_f32(vec, scale));
+        }
+#endif
+    } else {
+        *this /= length;
+    }
     return length;
 }
-
-using Vec3f = Vec3<float>;
-using Vec3i = Vec3<int>;
-using Vec3u = Vec3<unsigned int>;
 
 template <typename T>
 class alignas(16) Vec4 {
@@ -942,21 +1024,23 @@ public:
 #endif
     };
 
-    T* AsArray() {
+    [[nodiscard]] T* AsArray() {
         return &x;
     }
 
-    const T* AsArray() const {
+    [[nodiscard]] const T* AsArray() const {
         return &x;
     }
 
     constexpr Vec4() = default;
+
     constexpr Vec4(const T& x_, const T& y_, const T& z_, const T& w_) {
         if constexpr (detail::is_vectorizable<T>::value) {
 #if defined(HAVE_SSE2)
             simd = _mm_set_ps(w_, z_, y_, x_);
 #elif defined(HAVE_NEON)
-            simd = {x_, y_, z_, w_};
+            float values[4] = {x_, y_, z_, w_};
+            simd = vld1q_f32(values);
 #endif
         } else {
             x = x_;
@@ -968,11 +1052,46 @@ public:
 
     template <typename T2>
     [[nodiscard]] constexpr Vec4<T2> Cast() const {
-        return Vec4<T2>(static_cast<T2>(x), static_cast<T2>(y), static_cast<T2>(z),
-                        static_cast<T2>(w));
+        if constexpr (detail::is_vectorizable<T>::value && detail::is_vectorizable<T2>::value) {
+            Vec4<T2> result;
+#if defined(HAVE_SSE2)
+            if constexpr (std::is_same_v<T, float> && std::is_same_v<T2, float>) {
+                result.simd = simd;
+            } else {
+                result.x = static_cast<T2>(x);
+                result.y = static_cast<T2>(y);
+                result.z = static_cast<T2>(z);
+                result.w = static_cast<T2>(w);
+            }
+#elif defined(HAVE_NEON)
+            if constexpr (std::is_same_v<T, float> && std::is_same_v<T2, float>) {
+                result.simd = simd;
+            } else {
+                result.x = static_cast<T2>(x);
+                result.y = static_cast<T2>(y);
+                result.z = static_cast<T2>(z);
+                result.w = static_cast<T2>(w);
+            }
+#endif
+            return result;
+        } else {
+            return Vec4<T2>(static_cast<T2>(x), static_cast<T2>(y), static_cast<T2>(z),
+                            static_cast<T2>(w));
+        }
     }
 
     [[nodiscard]] static constexpr Vec4 AssignToAll(const T& f) {
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_SSE2)
+            Vec4 result;
+            result.simd = _mm_set1_ps(f);
+            return result;
+#elif defined(HAVE_NEON)
+            Vec4 result;
+            result.simd = vdupq_n_f32(f);
+            return result;
+#endif
+        }
         return Vec4(f, f, f, f);
     }
 
@@ -991,10 +1110,18 @@ public:
     }
 
     constexpr Vec4& operator+=(const Vec4& other) {
-        x += other.x;
-        y += other.y;
-        z += other.z;
-        w += other.w;
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_SSE2)
+            simd = _mm_add_ps(simd, other.simd);
+#elif defined(HAVE_NEON)
+            simd = vaddq_f32(simd, other.simd);
+#endif
+        } else {
+            x += other.x;
+            y += other.y;
+            z += other.z;
+            w += other.w;
+        }
         return *this;
     }
 
@@ -1030,7 +1157,17 @@ public:
 
     template <typename U = T>
     [[nodiscard]] constexpr Vec4<std::enable_if_t<std::is_signed_v<U>, U>> operator-() const {
-        return {-x, -y, -z, -w};
+        if constexpr (detail::is_vectorizable<T>::value) {
+            Vec4<T> result;
+#if defined(HAVE_SSE2)
+            result.simd = _mm_sub_ps(_mm_setzero_ps(), simd);
+#elif defined(HAVE_NEON)
+            result.simd = vnegq_f32(simd);
+#endif
+            return result;
+        } else {
+            return {-x, -y, -z, -w};
+        }
     }
 
     [[nodiscard]] constexpr Vec4<decltype(T{} * T{})> operator*(const Vec4& other) const {
@@ -1086,10 +1223,10 @@ public:
 #if defined(HAVE_SSE2)
             result.simd = _mm_div_ps(simd, _mm_set1_ps(f));
 #elif defined(HAVE_NEON)
-            // NEON doesn't have direct division, use reciprocal multiplication
+            // Improved precision with two Newton-Raphson iterations
             float32x4_t recip = vrecpeq_f32(vdupq_n_f32(f));
-            // One Newton-Raphson iteration for better precision
-            recip = vmulq_f32(vrecpsq_f32(vdupq_n_f32(f), recip), recip);
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
             result.simd = vmulq_f32(simd, recip);
 #endif
             return result;
@@ -1104,10 +1241,10 @@ public:
 #if defined(HAVE_SSE2)
             simd = _mm_div_ps(simd, _mm_set1_ps(f));
 #elif defined(HAVE_NEON)
-            // NEON doesn't have direct division, use reciprocal multiplication
+            // Improved precision with two Newton-Raphson iterations
             float32x4_t recip = vrecpeq_f32(vdupq_n_f32(f));
-            // One Newton-Raphson iteration for better precision
-            recip = vmulq_f32(vrecpsq_f32(vdupq_n_f32(f), recip), recip);
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(f), recip));
             simd = vmulq_f32(simd, recip);
 #endif
         } else {
@@ -1123,11 +1260,11 @@ public:
         if constexpr (detail::is_vectorizable<T>::value) {
 #if defined(HAVE_SSE2)
             __m128 cmp = _mm_cmpeq_ps(simd, other.simd);
-            return _mm_movemask_ps(cmp) == 0xF; // All 4 components must match
+            return (_mm_movemask_ps(cmp) & 0xF) == 0xF;
 #elif defined(HAVE_NEON)
             uint32x4_t cmp = vceqq_f32(simd, other.simd);
-            uint32x2_t fold = vand_u32(vget_low_u32(cmp), vget_high_u32(cmp));
-            return vget_lane_u32(vpmin_u32(fold, fold), 0) == 0xFFFFFFFF;
+            uint32x2_t hi_lo = vand_u32(vget_high_u32(cmp), vget_low_u32(cmp));
+            return (vget_lane_u32(vand_u32(hi_lo, vrev64_u32(hi_lo)), 0)) == 0xFFFFFFFF;
 #endif
         } else {
             return x == other.x && y == other.y && z == other.z && w == other.w;
@@ -1140,12 +1277,13 @@ public:
 
     [[nodiscard]] constexpr T Length2() const {
         if constexpr (detail::is_vectorizable<T>::value) {
-#if defined(HAVE_SSE2)
+#if defined(HAVE_SSE4_1)
+            return _mm_cvtss_f32(_mm_dp_ps(simd, simd, 0xF1));
+#elif defined(HAVE_SSE2)
             __m128 sq = _mm_mul_ps(simd, simd);
-            // Horizontal add all four components
-            __m128 sum1 = _mm_add_ps(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 3, 0, 1)));
-            __m128 sum2 = _mm_add_ps(sum1, _mm_shuffle_ps(sum1, sum1, _MM_SHUFFLE(1, 0, 3, 2)));
-            return _mm_cvtss_f32(sum2);
+            __m128 sum = _mm_add_ps(_mm_add_ps(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 3, 0, 1))),
+                                    _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 0, 3, 2)));
+            return _mm_cvtss_f32(sum);
 #elif defined(HAVE_NEON)
             float32x4_t sq = vmulq_f32(simd, simd);
             float32x2_t sum = vpadd_f32(vget_low_f32(sq), vget_high_f32(sq));
@@ -1156,6 +1294,10 @@ public:
         }
     }
 
+    [[nodiscard]] float Length() const;
+    [[nodiscard]] Vec4 Normalized() const;
+    float Normalize(); // returns the previous length, which is often useful
+
     [[nodiscard]] constexpr T& operator[](std::size_t i) {
         return *((&x) + i);
     }
@@ -1165,13 +1307,21 @@ public:
     }
 
     constexpr void SetZero() {
-        x = 0;
-        y = 0;
-        z = 0;
-        w = 0;
+        if constexpr (detail::is_vectorizable<T>::value) {
+#if defined(HAVE_SSE2)
+            simd = _mm_setzero_ps();
+#elif defined(HAVE_NEON)
+            simd = vdupq_n_f32(0.0f);
+#endif
+        } else {
+            x = 0;
+            y = 0;
+            z = 0;
+            w = 0;
+        }
     }
 
-    // Common alias: RGBA (colors)
+    // Common aliases: RGBA (colors), STPQ (texture coordinates)
     [[nodiscard]] constexpr T& r() {
         return x;
     }
@@ -1182,6 +1332,19 @@ public:
         return z;
     }
     [[nodiscard]] constexpr T& a() {
+        return w;
+    }
+
+    [[nodiscard]] constexpr T& s() {
+        return x;
+    }
+    [[nodiscard]] constexpr T& t() {
+        return y;
+    }
+    [[nodiscard]] constexpr T& p() {
+        return z;
+    }
+    [[nodiscard]] constexpr T& q() {
         return w;
     }
 
@@ -1198,432 +1361,140 @@ public:
         return w;
     }
 
-// Swizzlers - Create a subvector of specific components
-// e.g. Vec2 uv() { return Vec2(x,y); }
+    [[nodiscard]] constexpr const T& s() const {
+        return x;
+    }
+    [[nodiscard]] constexpr const T& t() const {
+        return y;
+    }
+    [[nodiscard]] constexpr const T& p() const {
+        return z;
+    }
+    [[nodiscard]] constexpr const T& q() const {
+        return w;
+    }
 
-// _DEFINE_SWIZZLER2 defines a single such function
-// DEFINE_SWIZZLER2_COMP1 defines one-component functions for all component names (x<->r)
-// DEFINE_SWIZZLER2_COMP2 defines two component functions for all component names (x<->r) and
-// permutations (xy<->yx)
-#define _DEFINE_SWIZZLER2(a, b, name)                                                              \
+// swizzlers - create a subvector of specific components
+#define DEFINE_SWIZZLER2(a, b, name)                                                               \
     [[nodiscard]] constexpr Vec2<T> name() const {                                                 \
         return Vec2<T>(a, b);                                                                      \
     }
-#define DEFINE_SWIZZLER2_COMP1(a, a2)                                                              \
-    _DEFINE_SWIZZLER2(a, a, a##a);                                                                 \
-    _DEFINE_SWIZZLER2(a, a, a2##a2)
-#define DEFINE_SWIZZLER2_COMP2(a, b, a2, b2)                                                       \
-    _DEFINE_SWIZZLER2(a, b, a##b);                                                                 \
-    _DEFINE_SWIZZLER2(a, b, a2##b2);                                                               \
-    _DEFINE_SWIZZLER2(b, a, b##a);                                                                 \
-    _DEFINE_SWIZZLER2(b, a, b2##a2)
 
-    DEFINE_SWIZZLER2_COMP2(x, y, r, g);
-    DEFINE_SWIZZLER2_COMP2(x, z, r, b);
-    DEFINE_SWIZZLER2_COMP2(x, w, r, a);
-    DEFINE_SWIZZLER2_COMP2(y, z, g, b);
-    DEFINE_SWIZZLER2_COMP2(y, w, g, a);
-    DEFINE_SWIZZLER2_COMP2(z, w, b, a);
-    DEFINE_SWIZZLER2_COMP1(x, r);
-    DEFINE_SWIZZLER2_COMP1(y, g);
-    DEFINE_SWIZZLER2_COMP1(z, b);
-    DEFINE_SWIZZLER2_COMP1(w, a);
-#undef DEFINE_SWIZZLER2_COMP1
-#undef DEFINE_SWIZZLER2_COMP2
-#undef _DEFINE_SWIZZLER2
+    DEFINE_SWIZZLER2(x, y, xy);
+    DEFINE_SWIZZLER2(x, z, xz);
+    DEFINE_SWIZZLER2(x, w, xw);
+    DEFINE_SWIZZLER2(y, z, yz);
+    DEFINE_SWIZZLER2(y, w, yw);
+    DEFINE_SWIZZLER2(z, w, zw);
+    DEFINE_SWIZZLER2(r, g, rg);
+    DEFINE_SWIZZLER2(r, b, rb);
+    DEFINE_SWIZZLER2(r, a, ra);
+    DEFINE_SWIZZLER2(g, b, gb);
+    DEFINE_SWIZZLER2(g, a, ga);
+    DEFINE_SWIZZLER2(b, a, ba);
+    DEFINE_SWIZZLER2(s, t, st);
+    DEFINE_SWIZZLER2(s, p, sp);
+    DEFINE_SWIZZLER2(s, q, sq);
+    DEFINE_SWIZZLER2(t, p, tp);
+    DEFINE_SWIZZLER2(t, q, tq);
+    DEFINE_SWIZZLER2(p, q, pq);
 
-#define _DEFINE_SWIZZLER3(a, b, c, name)                                                           \
+#define DEFINE_SWIZZLER3(a, b, c, name)                                                            \
     [[nodiscard]] constexpr Vec3<T> name() const {                                                 \
         return Vec3<T>(a, b, c);                                                                   \
     }
-#define DEFINE_SWIZZLER3_COMP1(a, a2)                                                              \
-    _DEFINE_SWIZZLER3(a, a, a, a##a##a);                                                           \
-    _DEFINE_SWIZZLER3(a, a, a, a2##a2##a2)
-#define DEFINE_SWIZZLER3_COMP3(a, b, c, a2, b2, c2)                                                \
-    _DEFINE_SWIZZLER3(a, b, c, a##b##c);                                                           \
-    _DEFINE_SWIZZLER3(a, c, b, a##c##b);                                                           \
-    _DEFINE_SWIZZLER3(b, a, c, b##a##c);                                                           \
-    _DEFINE_SWIZZLER3(b, c, a, b##c##a);                                                           \
-    _DEFINE_SWIZZLER3(c, a, b, c##a##b);                                                           \
-    _DEFINE_SWIZZLER3(c, b, a, c##b##a);                                                           \
-    _DEFINE_SWIZZLER3(a, b, c, a2##b2##c2);                                                        \
-    _DEFINE_SWIZZLER3(a, c, b, a2##c2##b2);                                                        \
-    _DEFINE_SWIZZLER3(b, a, c, b2##a2##c2);                                                        \
-    _DEFINE_SWIZZLER3(b, c, a, b2##c2##a2);                                                        \
-    _DEFINE_SWIZZLER3(c, a, b, c2##a2##b2);                                                        \
-    _DEFINE_SWIZZLER3(c, b, a, c2##b2##a2)
 
-    DEFINE_SWIZZLER3_COMP3(x, y, z, r, g, b);
-    DEFINE_SWIZZLER3_COMP3(x, y, w, r, g, a);
-    DEFINE_SWIZZLER3_COMP3(x, z, w, r, b, a);
-    DEFINE_SWIZZLER3_COMP3(y, z, w, g, b, a);
-    DEFINE_SWIZZLER3_COMP1(x, r);
-    DEFINE_SWIZZLER3_COMP1(y, g);
-    DEFINE_SWIZZLER3_COMP1(z, b);
-    DEFINE_SWIZZLER3_COMP1(w, a);
-#undef DEFINE_SWIZZLER3_COMP1
-#undef DEFINE_SWIZZLER3_COMP3
-#undef _DEFINE_SWIZZLER3
+    DEFINE_SWIZZLER3(x, y, z, xyz);
+    DEFINE_SWIZZLER3(x, y, w, xyw);
+    DEFINE_SWIZZLER3(x, z, w, xzw);
+    DEFINE_SWIZZLER3(y, z, w, yzw);
+    DEFINE_SWIZZLER3(r, g, b, rgb);
+    DEFINE_SWIZZLER3(r, g, a, rga);
+    DEFINE_SWIZZLER3(r, b, a, rba);
+    DEFINE_SWIZZLER3(g, b, a, gba);
+    DEFINE_SWIZZLER3(s, t, p, stp);
+    DEFINE_SWIZZLER3(s, t, q, stq);
+    DEFINE_SWIZZLER3(s, p, q, spq);
+    DEFINE_SWIZZLER3(t, p, q, tpq);
+
+#undef DEFINE_SWIZZLER2
+#undef DEFINE_SWIZZLER3
 };
 
 template <typename T, typename V>
-[[nodiscard]] constexpr Vec4<decltype(V{} * T{})> operator*(const V& f, const Vec4<T>& vec) {
-    if constexpr (detail::is_vectorizable<T>::value && std::is_same_v<V, float>) {
-        Vec4<decltype(V{} * T{})> result;
-#if defined(HAVE_SSE2)
-        result.simd = _mm_mul_ps(_mm_set1_ps(f), vec.simd);
-#elif defined(HAVE_NEON)
-        result.simd = vmulq_f32(vdupq_n_f32(f), vec.simd);
-#endif
-        return result;
-    } else {
-        return {f * vec.x, f * vec.y, f * vec.z, f * vec.w};
-    }
+[[nodiscard]] constexpr Vec4<T> operator*(const V& f, const Vec4<T>& vec) {
+    return vec * f;
 }
 
 using Vec4f = Vec4<float>;
 using Vec4i = Vec4<int>;
 using Vec4u = Vec4<unsigned int>;
 
-template <typename T>
-constexpr decltype(T{} * T{} + T{} * T{}) Dot(const Vec2<T>& a, const Vec2<T>& b) {
-    if constexpr (detail::is_vectorizable<T>::value) {
+template <>
+inline float Vec4<float>::Length() const {
 #if defined(HAVE_SSE4_1)
-        // Load 2D vectors into lower half of SSE register and use SSE4.1 dot product
-        __m128 va = _mm_setr_ps(a.x, a.y, 0.0f, 0.0f);
-        __m128 vb = _mm_setr_ps(b.x, b.y, 0.0f, 0.0f);
-        return _mm_cvtss_f32(
-            _mm_dp_ps(va, vb, 0x31)); // 0x31: only multiply xy (0x3) and store in lowest (0x1)
+    return _mm_cvtss_f32(_mm_sqrt_ss(_mm_dp_ps(simd, simd, 0xF1)));
 #elif defined(HAVE_SSE2)
-        // Load just the two components we need
-        __m128 va = _mm_setr_ps(a.x, a.y, 0.0f, 0.0f);
-        __m128 vb = _mm_setr_ps(b.x, b.y, 0.0f, 0.0f);
-        __m128 mul = _mm_mul_ps(va, vb);
-        // Add first two elements (x and y)
-        __m128 sum = _mm_add_ss(mul, _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(1, 1, 1, 1)));
-        return _mm_cvtss_f32(sum);
+    __m128 sq = _mm_mul_ps(simd, simd);
+    __m128 sum = _mm_add_ps(_mm_add_ps(sq, _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 3, 0, 1))),
+                            _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(1, 0, 3, 2)));
+    return _mm_cvtss_f32(_mm_sqrt_ss(sum));
 #elif defined(HAVE_NEON)
-        // Load just the two components into a 64-bit register
-        float32x2_t va = {a.x, a.y};
-        float32x2_t vb = {b.x, b.y};
-        // Multiply and add horizontally in one go
-        float32x2_t mul = vmul_f32(va, vb);
-        return vget_lane_f32(vpadd_f32(mul, mul), 0);
+    float32x4_t sq = vmulq_f32(simd, simd);
+    float32x2_t sum = vpadd_f32(vget_low_f32(sq), vget_high_f32(sq));
+    float32x2_t total = vpadd_f32(sum, sum);
+    return sqrtf(vget_lane_f32(total, 0));
+#else
+    return std::sqrt(x * x + y * y + z * z + w * w);
 #endif
-    } else {
-        return a.x * b.x + a.y * b.y;
-    }
 }
 
-template <typename T>
-[[nodiscard]] constexpr decltype(T{} * T{} + T{} * T{}) Dot(const Vec3<T>& a, const Vec3<T>& b) {
-    if constexpr (detail::is_vectorizable<T>::value) {
-#if defined(HAVE_SSE4_1)
-        // SSE4.1 has a dedicated dot product instruction
-        // 0xF1 mask: multiply all components (0xF) but only store result in lowest component (0x1)
-        return _mm_cvtss_f32(_mm_dp_ps(_mm_load_ps(&a.x), _mm_load_ps(&b.x), 0x71));
-#elif defined(HAVE_SSE2)
-        __m128 va = _mm_load_ps(&a.x);
-        __m128 vb = _mm_load_ps(&b.x);
-        __m128 mul = _mm_mul_ps(va, vb);
-        // Add x+y components
-        __m128 sum = _mm_add_ss(mul, _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(1, 1, 1, 1)));
-        // Add z component
-        sum = _mm_add_ss(sum, _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(2, 2, 2, 2)));
-        return _mm_cvtss_f32(sum);
-#elif defined(HAVE_NEON)
-        float32x4_t va = vld1q_f32(&a.x);
-        float32x4_t vb = vld1q_f32(&b.x);
-        float32x4_t mul = vmulq_f32(va, vb);
-        float32x2_t sum = vget_low_f32(mul);
-        // Add first two elements
-        sum = vpadd_f32(sum, sum);
-        // Add third element
-        return vget_lane_f32(sum, 0) + vgetq_lane_f32(mul, 2);
-#endif
-    } else {
-        return a.x * b.x + a.y * b.y + a.z * b.z;
-    }
-}
-
-template <typename T>
-[[nodiscard]] constexpr decltype(T{} * T{} + T{} * T{}) Dot(const Vec4<T>& a, const Vec4<T>& b) {
-    if constexpr (detail::is_vectorizable<T>::value) {
-#if defined(HAVE_SSE4_1)
-        // SSE4.1 has a dedicated dot product instruction
-        return _mm_cvtss_f32(_mm_dp_ps(a.simd, b.simd, 0xF1));
-#elif defined(HAVE_SSE2)
-        __m128 mul = _mm_mul_ps(a.simd, b.simd);
-        // Add pairs
-        __m128 sum1 = _mm_add_ps(mul, _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(2, 3, 0, 1)));
-        // Add remaining pairs
-        __m128 sum2 = _mm_add_ps(sum1, _mm_shuffle_ps(sum1, sum1, _MM_SHUFFLE(1, 0, 3, 2)));
-        return _mm_cvtss_f32(sum2);
-#elif defined(HAVE_NEON)
-        float32x4_t mul = vmulq_f32(a.simd, b.simd);
-        float32x2_t sum = vpadd_f32(vget_low_f32(mul), vget_high_f32(mul));
-        return vget_lane_f32(vpadd_f32(sum, sum), 0);
-#endif
-    } else {
-        return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-    }
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec3<decltype(T{} * T{} - T{} * T{})> Cross(const Vec3<T>& a,
-                                                                    const Vec3<T>& b) {
-    if constexpr (detail::is_vectorizable<T>::value) {
-        Vec3<T> result;
+template <>
+inline Vec4<float> Vec4<float>::Normalized() const {
+    const float length = Length();
+    if constexpr (detail::is_vectorizable<float>::value) {
 #if defined(HAVE_SSE2)
-        __m128 a_yzx =
-            _mm_shuffle_ps(_mm_load_ps(&a.x), _mm_load_ps(&a.x), _MM_SHUFFLE(3, 0, 2, 1));
-        __m128 b_yzx =
-            _mm_shuffle_ps(_mm_load_ps(&b.x), _mm_load_ps(&b.x), _MM_SHUFFLE(3, 0, 2, 1));
-        __m128 c =
-            _mm_sub_ps(_mm_mul_ps(_mm_load_ps(&a.x), b_yzx), _mm_mul_ps(_mm_load_ps(&b.x), a_yzx));
-        _mm_store_ps(&result.x, _mm_shuffle_ps(c, c, _MM_SHUFFLE(3, 0, 2, 1)));
+        if (length != 0) {
+            Vec4 result;
+            result.simd = _mm_div_ps(simd, _mm_set1_ps(length));
+            return result;
+        }
 #elif defined(HAVE_NEON)
-        float32x4_t a_vec = vld1q_f32(&a.x);
-        float32x4_t b_vec = vld1q_f32(&b.x);
-        float32x4_t a_yzx = vextq_f32(a_vec, a_vec, 1);
-        float32x4_t b_yzx = vextq_f32(b_vec, b_vec, 1);
-        float32x4_t c = vsubq_f32(vmulq_f32(a_vec, b_yzx), vmulq_f32(b_vec, a_yzx));
-        vst1q_f32(&result.x, vextq_f32(c, c, 3));
+        if (length != 0) {
+            Vec4 result;
+            float32x4_t recip = vrecpeq_f32(vdupq_n_f32(length));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(length), recip));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(length), recip));
+            result.simd = vmulq_f32(simd, recip);
+            return result;
+        }
 #endif
-        return result;
+    }
+    return *this / length;
+}
+
+template <>
+inline float Vec4<float>::Normalize() {
+    const float length = Length();
+    if constexpr (detail::is_vectorizable<float>::value) {
+#if defined(HAVE_SSE2)
+        if (length != 0) {
+            simd = _mm_div_ps(simd, _mm_set1_ps(length));
+        }
+#elif defined(HAVE_NEON)
+        if (length != 0) {
+            float32x4_t recip = vrecpeq_f32(vdupq_n_f32(length));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(length), recip));
+            recip = vmulq_f32(recip, vrecpsq_f32(vdupq_n_f32(length), recip));
+            simd = vmulq_f32(simd, recip);
+        }
+#endif
     } else {
-        return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+        *this /= length;
     }
-}
-
-// linear interpolation via float: 0.0=begin, 1.0=end
-template <typename X>
-[[nodiscard]] constexpr decltype(X{} * float{} + X{} * float{}) Lerp(const X& begin, const X& end,
-                                                                     const float t) {
-    if constexpr (detail::is_vectorizable<X>::value) {
-#if defined(HAVE_SSE2)
-        // For Vec2
-        if constexpr (std::is_same_v<X, Vec2<float>>) {
-            __m128 vbegin = _mm_setr_ps(begin.x, begin.y, 0.0f, 0.0f);
-            __m128 vend = _mm_setr_ps(end.x, end.y, 0.0f, 0.0f);
-            __m128 vt = _mm_set1_ps(t);
-            __m128 invt = _mm_sub_ps(_mm_set1_ps(1.0f), vt);
-            __m128 result = _mm_add_ps(_mm_mul_ps(vbegin, invt), _mm_mul_ps(vend, vt));
-            return Vec2<float>(
-                _mm_cvtss_f32(result),
-                _mm_cvtss_f32(_mm_shuffle_ps(result, result, _MM_SHUFFLE(1, 1, 1, 1))));
-        }
-        // For Vec3
-        else if constexpr (std::is_same_v<X, Vec3<float>>) {
-            __m128 vbegin = _mm_load_ps(&begin.x);
-            __m128 vend = _mm_load_ps(&end.x);
-            __m128 vt = _mm_set1_ps(t);
-            __m128 invt = _mm_sub_ps(_mm_set1_ps(1.0f), vt);
-            __m128 result = _mm_add_ps(_mm_mul_ps(vbegin, invt), _mm_mul_ps(vend, vt));
-            Vec3<float> ret;
-            _mm_store_ps(&ret.x, result);
-            return ret;
-        }
-        // For Vec4
-        else if constexpr (std::is_same_v<X, Vec4<float>>) {
-            __m128 invt = _mm_sub_ps(_mm_set1_ps(1.0f), _mm_set1_ps(t));
-            __m128 result =
-                _mm_add_ps(_mm_mul_ps(begin.simd, invt), _mm_mul_ps(end.simd, _mm_set1_ps(t)));
-            Vec4<float> ret;
-            ret.simd = result;
-            return ret;
-        }
-#elif defined(HAVE_NEON)
-        // For Vec2
-        if constexpr (std::is_same_v<X, Vec2<float>>) {
-            float32x2_t vbegin = {begin.x, begin.y};
-            float32x2_t vend = {end.x, end.y};
-            float32x2_t vt = vdup_n_f32(t);
-            float32x2_t invt = vdup_n_f32(1.0f - t);
-            float32x2_t result = vadd_f32(vmul_f32(vbegin, invt), vmul_f32(vend, vt));
-            return Vec2<float>(vget_lane_f32(result, 0), vget_lane_f32(result, 1));
-        }
-        // For Vec3
-        else if constexpr (std::is_same_v<X, Vec3<float>>) {
-            float32x4_t vbegin = vld1q_f32(&begin.x);
-            float32x4_t vend = vld1q_f32(&end.x);
-            float32x4_t vt = vdupq_n_f32(t);
-            float32x4_t invt = vdupq_n_f32(1.0f - t);
-            float32x4_t result = vaddq_f32(vmulq_f32(vbegin, invt), vmulq_f32(vend, vt));
-            Vec3<float> ret;
-            vst1q_f32(&ret.x, result);
-            return ret;
-        }
-        // For Vec4
-        else if constexpr (std::is_same_v<X, Vec4<float>>) {
-            float32x4_t invt = vdupq_n_f32(1.0f - t);
-            float32x4_t vt = vdupq_n_f32(t);
-            float32x4_t result = vaddq_f32(vmulq_f32(begin.simd, invt), vmulq_f32(end.simd, vt));
-            Vec4<float> ret;
-            ret.simd = result;
-            return ret;
-        }
-#endif
-    }
-    // Fallback for non-vectorizable types
-    return begin * (1.f - t) + end * t;
-}
-
-// linear interpolation via int: 0=begin, base=end
-template <typename X, int base>
-[[nodiscard]] constexpr decltype((X{} * int{} + X{} * int{}) / base) LerpInt(const X& begin,
-                                                                             const X& end,
-                                                                             const int t) {
-    if constexpr (detail::is_vectorizable<X>::value) {
-#if defined(HAVE_SSE2)
-        // For Vec2
-        if constexpr (std::is_same_v<X, Vec2<float>>) {
-            __m128 vbegin = _mm_setr_ps(begin.x, begin.y, 0.0f, 0.0f);
-            __m128 vend = _mm_setr_ps(end.x, end.y, 0.0f, 0.0f);
-            __m128 vt = _mm_set1_ps(static_cast<float>(t));
-            __m128 vbase_minus_t = _mm_set1_ps(static_cast<float>(base - t));
-            __m128 vbase = _mm_set1_ps(static_cast<float>(base));
-            __m128 result = _mm_div_ps(
-                _mm_add_ps(_mm_mul_ps(vbegin, vbase_minus_t), _mm_mul_ps(vend, vt)), vbase);
-            return Vec2<float>(
-                _mm_cvtss_f32(result),
-                _mm_cvtss_f32(_mm_shuffle_ps(result, result, _MM_SHUFFLE(1, 1, 1, 1))));
-        }
-        // For Vec3
-        else if constexpr (std::is_same_v<X, Vec3<float>>) {
-            __m128 vbegin = _mm_load_ps(&begin.x);
-            __m128 vend = _mm_load_ps(&end.x);
-            __m128 vt = _mm_set1_ps(static_cast<float>(t));
-            __m128 vbase_minus_t = _mm_set1_ps(static_cast<float>(base - t));
-            __m128 vbase = _mm_set1_ps(static_cast<float>(base));
-            __m128 result = _mm_div_ps(
-                _mm_add_ps(_mm_mul_ps(vbegin, vbase_minus_t), _mm_mul_ps(vend, vt)), vbase);
-            Vec3<float> ret;
-            _mm_store_ps(&ret.x, result);
-            return ret;
-        }
-        // For Vec4
-        else if constexpr (std::is_same_v<X, Vec4<float>>) {
-            __m128 vt = _mm_set1_ps(static_cast<float>(t));
-            __m128 vbase_minus_t = _mm_set1_ps(static_cast<float>(base - t));
-            __m128 vbase = _mm_set1_ps(static_cast<float>(base));
-            __m128 result = _mm_div_ps(
-                _mm_add_ps(_mm_mul_ps(begin.simd, vbase_minus_t), _mm_mul_ps(end.simd, vt)), vbase);
-            Vec4<float> ret;
-            ret.simd = result;
-            return ret;
-        }
-#elif defined(HAVE_NEON)
-        // For Vec2
-        if constexpr (std::is_same_v<X, Vec2<float>>) {
-            float32x2_t vbegin = {begin.x, begin.y};
-            float32x2_t vend = {end.x, end.y};
-            float32x2_t vt = vdup_n_f32(static_cast<float>(t));
-            float32x2_t vbase_minus_t = vdup_n_f32(static_cast<float>(base - t));
-            float32x2_t vbase = vdup_n_f32(static_cast<float>(base));
-            float32x2_t result =
-                vdiv_f32(vadd_f32(vmul_f32(vbegin, vbase_minus_t), vmul_f32(vend, vt)), vbase);
-            return Vec2<float>(vget_lane_f32(result, 0), vget_lane_f32(result, 1));
-        }
-        // For Vec3
-        else if constexpr (std::is_same_v<X, Vec3<float>>) {
-            float32x4_t vbegin = vld1q_f32(&begin.x);
-            float32x4_t vend = vld1q_f32(&end.x);
-            float32x4_t vt = vdupq_n_f32(static_cast<float>(t));
-            float32x4_t vbase_minus_t = vdupq_n_f32(static_cast<float>(base - t));
-            float32x4_t vbase = vdupq_n_f32(static_cast<float>(base));
-            float32x4_t result =
-                vdivq_f32(vaddq_f32(vmulq_f32(vbegin, vbase_minus_t), vmulq_f32(vend, vt)), vbase);
-            Vec3<float> ret;
-            vst1q_f32(&ret.x, result);
-            return ret;
-        }
-        // For Vec4
-        else if constexpr (std::is_same_v<X, Vec4<float>>) {
-            float32x4_t vt = vdupq_n_f32(static_cast<float>(t));
-            float32x4_t vbase_minus_t = vdupq_n_f32(static_cast<float>(base - t));
-            float32x4_t vbase = vdupq_n_f32(static_cast<float>(base));
-            float32x4_t result = vdivq_f32(
-                vaddq_f32(vmulq_f32(begin.simd, vbase_minus_t), vmulq_f32(end.simd, vt)), vbase);
-            Vec4<float> ret;
-            ret.simd = result;
-            return ret;
-        }
-#endif
-    }
-    // Fallback for non-vectorizable types
-    return (begin * (base - t) + end * t) / base;
-}
-
-// bilinear interpolation. s is for interpolating x00-x01 and x10-x11, and t is for the second
-// interpolation.
-template <typename X>
-[[nodiscard]] constexpr auto BilinearInterp(const X& x00, const X& x01, const X& x10, const X& x11,
-                                            const float s, const float t) {
-    auto y0 = Lerp(x00, x01, s);
-    auto y1 = Lerp(x10, x11, s);
-    return Lerp(y0, y1, t);
-}
-
-// Utility vector factories
-template <typename T>
-[[nodiscard]] constexpr Vec2<T> MakeVec(const T& x, const T& y) {
-    return Vec2<T>{x, y};
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec3<T> MakeVec(const T& x, const T& y, const T& z) {
-    return Vec3<T>{x, y, z};
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const T& x, const T& y, const Vec2<T>& zw) {
-    return MakeVec(x, y, zw[0], zw[1]);
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec3<T> MakeVec(const Vec2<T>& xy, const T& z) {
-    return MakeVec(xy[0], xy[1], z);
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec3<T> MakeVec(const T& x, const Vec2<T>& yz) {
-    return MakeVec(x, yz[0], yz[1]);
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const T& x, const T& y, const T& z, const T& w) {
-    return Vec4<T>{x, y, z, w};
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const Vec2<T>& xy, const T& z, const T& w) {
-    return MakeVec(xy[0], xy[1], z, w);
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const T& x, const Vec2<T>& yz, const T& w) {
-    return MakeVec(x, yz[0], yz[1], w);
-}
-
-// NOTE: This has priority over "Vec2<Vec2<T>> MakeVec(const Vec2<T>& x, const Vec2<T>& y)".
-//       Even if someone wanted to use an odd object like Vec2<Vec2<T>>, the compiler would error
-//       out soon enough due to misuse of the returned structure.
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const Vec2<T>& xy, const Vec2<T>& zw) {
-    return MakeVec(xy[0], xy[1], zw[0], zw[1]);
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const Vec3<T>& xyz, const T& w) {
-    return MakeVec(xyz[0], xyz[1], xyz[2], w);
-}
-
-template <typename T>
-[[nodiscard]] constexpr Vec4<T> MakeVec(const T& x, const Vec3<T>& yzw) {
-    return MakeVec(x, yzw[0], yzw[1], yzw[2]);
+    return length;
 }
 
 } // namespace Common
 
-#endif
+#endif // COMMON_VECTOR_MATH_H
