@@ -13,8 +13,7 @@
 
 // Numbers are chosen randomly to make sure the correct one is given.
 static constexpr std::array<u64, 5> CB_IDS{{42, 144, 93, 1026, UINT64_C(0xFFFF7FFFF7FFFF)}};
-static constexpr int MAX_SLICE_LENGTH =
-    BASE_CLOCK_RATE_ARM11 / 234; // Copied from CoreTiming internals
+static constexpr int MAX_SLICE_LENGTH = 20000; // Copied from CoreTiming internals
 
 static std::bitset<CB_IDS.size()> callbacks_ran_flags;
 static u64 expected_callback = 0;
@@ -37,9 +36,7 @@ static void AdvanceAndCheck(Core::Timing& timing, u32 idx, int downcount, int ex
 
     timing.GetTimer(0)->AddTicks(timing.GetTimer(0)->GetDowncount() -
                                  cpu_downcount); // Pretend we executed X cycles of instructions.
-
     timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice();
 
     REQUIRE(decltype(callbacks_ran_flags)().set(idx) == callbacks_ran_flags);
     REQUIRE(downcount == timing.GetTimer(0)->GetDowncount());
@@ -56,7 +53,6 @@ TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
 
     // Enter slice 0
     timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice();
 
     // D -> B -> C -> A -> E
     timing.ScheduleEvent(1000, cb_a, CB_IDS[0], 0);
@@ -110,7 +106,6 @@ TEST_CASE("CoreTiming[SharedSlot]", "[core]") {
 
     // Enter slice 0
     timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice();
     REQUIRE(1000 == timing.GetTimer(0)->GetDowncount());
 
     callbacks_ran_flags = 0;
@@ -118,7 +113,6 @@ TEST_CASE("CoreTiming[SharedSlot]", "[core]") {
     lateness = 0;
     timing.GetTimer(0)->AddTicks(timing.GetTimer(0)->GetDowncount());
     timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice();
     REQUIRE(MAX_SLICE_LENGTH == timing.GetTimer(0)->GetDowncount());
     REQUIRE(0x1FULL == callbacks_ran_flags.to_ullong());
 }
@@ -131,7 +125,6 @@ TEST_CASE("CoreTiming[PredictableLateness]", "[core]") {
 
     // Enter slice 0
     timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice();
 
     timing.ScheduleEvent(100, cb_a, CB_IDS[0], 0);
     timing.ScheduleEvent(200, cb_b, CB_IDS[1], 0);
@@ -168,7 +161,6 @@ TEST_CASE("CoreTiming[ChainScheduling]", "[core]") {
 
     // Enter slice 0
     timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice();
 
     timing.ScheduleEvent(800, cb_a, CB_IDS[0], 0);
     timing.ScheduleEvent(1000, cb_b, CB_IDS[1], 0);
@@ -182,16 +174,14 @@ TEST_CASE("CoreTiming[ChainScheduling]", "[core]") {
     REQUIRE(2 == reschedules);
 
     timing.GetTimer(0)->AddTicks(timing.GetTimer(0)->GetDowncount());
-    timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice(); // cb_rs
+    timing.GetTimer(0)->Advance(); // cb_rs
     REQUIRE(1 == reschedules);
     REQUIRE(200 == timing.GetTimer(0)->GetDowncount());
 
     AdvanceAndCheck(timing, 2, 800); // cb_c
 
     timing.GetTimer(0)->AddTicks(timing.GetTimer(0)->GetDowncount());
-    timing.GetTimer(0)->Advance();
-    timing.GetTimer(0)->SetNextSlice(); // cb_rs
+    timing.GetTimer(0)->Advance(); // cb_rs
     REQUIRE(0 == reschedules);
     REQUIRE(MAX_SLICE_LENGTH == timing.GetTimer(0)->GetDowncount());
 }
