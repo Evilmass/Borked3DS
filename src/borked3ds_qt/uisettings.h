@@ -70,12 +70,12 @@ struct Values {
 
     Settings::Setting<bool> single_window_mode{true, "singleWindowMode"};
     Settings::Setting<bool> fullscreen{false, "fullscreen"};
-    Settings::Setting<bool> display_titlebar{true, "displayTitleBars"};
-    Settings::Setting<bool> show_filter_bar{true, "showFilterBar"};
+    Settings::Setting<bool> display_titlebar{false, "displayTitleBars"};
+    Settings::Setting<bool> show_filter_bar{false, "showFilterBar"};
     Settings::Setting<bool> show_status_bar{true, "showStatusBar"};
 
     Settings::Setting<bool> confirm_before_closing{true, "confirmClose"};
-    Settings::Setting<bool> save_state_warning{true, "saveStateWarning"};
+    Settings::Setting<bool> save_state_warning{false, "saveStateWarning"};
     Settings::Setting<bool> first_start{true, "firstStart"};
     Settings::Setting<bool> pause_when_in_background{false, "pauseWhenInBackground"};
     Settings::Setting<bool> mute_when_in_background{false, "muteWhenInBackground"};
@@ -86,7 +86,7 @@ struct Values {
     Settings::Setting<bool> check_for_update_on_start{true, "check_for_update_on_start"};
 
     // Discord RPC
-    Settings::Setting<bool> enable_discord_presence{true, "enable_discord_presence"};
+    Settings::Setting<bool> enable_discord_presence{false, "enable_discord_presence"};
 
     // Game List
     Settings::Setting<GameListIconSize> game_list_icon_size{GameListIconSize::LargeIcon,

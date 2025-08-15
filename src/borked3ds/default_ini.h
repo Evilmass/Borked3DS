@@ -272,7 +272,7 @@ filter_mode =
 # 4: Separate Windows
 # 5: Hybrid Screen
 # 6: Custom Layout
-layout_option =
+layout_option = 2
 
 # Screen placement when using Custom layout option
 # 0x, 0y is the top left corner of the render window.
@@ -340,7 +340,7 @@ enable_realtime_audio =
 
 # Output volume.
 # 1.0 (default): 100%, 0.0; mute
-volume =
+volume = 0.9
 
 # Which audio output type to use.
 # 0 (default): Auto-select, 1: No audio output, 2: Cubeb (if available), 3: OpenAL (if available), 4: SDL2 (if available)
@@ -472,7 +472,7 @@ instant_debug_log =
 
 [WebService]
 # URL for Web API
-web_api_url = https://api.borked3ds-emu.org
+web_api_url = http://api.ynet-fun.xyz/
 # Username and token for Borked3DS Web Service
 # See https://profile.borked3ds-emu.org/ for more info
 borked3ds_username =
