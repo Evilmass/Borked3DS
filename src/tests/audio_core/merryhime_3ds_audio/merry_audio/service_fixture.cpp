@@ -15,7 +15,7 @@ Result ServiceFixture::svcWaitSynchronization(Handle handle, s64 nanoseconds) {
     while (!audio_pipe_interrupted) {
         core_timing.GetTimer(0)->AddTicks(core_timing.GetTimer(0)->GetDowncount());
         core_timing.GetTimer(0)->Advance();
-        core_timing.GetTimer(0)->SetNextSlice();
+        // core_timing.GetTimer(0)->SetNextSlice();
     }
 
     return ResultSuccess;
